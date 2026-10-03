@@ -79,16 +79,58 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            report["claims"] = []
+            report["citations"] = []
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ để trả lời. Tôi không thể xác thực dữ liệu từ tài liệu đã đọc."
+            return report
+
+        observed = ctx.observed_text
+        kept = []
+        report["abstain"] = bool(report.get("abstain", False))
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str):
+                continue
+            if text in observed:
+                kept.append(claim)
+                continue
+
+            pieces = [part.strip() for part in text.split(" và ")]
+            if len(pieces) == 2 and pieces[0] and pieces[1]:
+                left, right = pieces[0], pieces[1]
+                if left in observed and right in observed:
+                    left_doc = None
+                    right_doc = None
+                    for doc in getattr(ctx.corpus, "docs", []):
+                        body = getattr(doc, "body", "")
+                        if not isinstance(body, str):
+                            continue
+                        lines = body.splitlines()
+                        if left_doc is None and left in lines:
+                            left_doc = doc.doc_id
+                        if right_doc is None and right in lines:
+                            right_doc = doc.doc_id
+                    if left_doc and right_doc and left_doc != right_doc:
+                        kept.append({"text": left, "doc_id": left_doc})
+                        kept.append({"text": right, "doc_id": right_doc})
+                        report["abstain"] = True
+                        continue
+
+        if not kept:
+            report["claims"] = []
+            report["citations"] = []
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ để trả lời. Tôi không thể xác thực dữ liệu từ tài liệu đã đọc."
+            return report
+
+        report["claims"] = kept
+        report["citations"] = sorted(
+            {claim["doc_id"] for claim in kept if isinstance(claim, dict) and isinstance(claim.get("doc_id"), str)}
+        )
+        return report
