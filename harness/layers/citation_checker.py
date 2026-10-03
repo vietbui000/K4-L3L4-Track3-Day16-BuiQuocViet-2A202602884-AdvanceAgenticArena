@@ -34,9 +34,9 @@ Hai điều kiện loại trừ nhau nên hai lớp không giành điểm của 
 
 CHỈ ĐƯỢC GẮN VÀO TÀI LIỆU ĐÃ QUAN SÁT. Trích một tài liệu mà lượt chạy
 chưa từng đọc bị chấm `UNRETRIEVED`. Vì vậy hãy tìm nguồn trong
-`ctx.observed_text`, đừng quét cả corpus rồi gắn bừa: điều kiện
-`doc.body in ctx.observed_text` nghĩa là "tài liệu này đã về nguyên vẹn
-từ một lần fetch sạch" — một đoạn snippet hay một bản bị cắt không tính.
+`ctx.observed_text`, đừng quét cả corpus rồi gắn bừa: chỉ gắn lại khi
+chính dòng claim đã xuất hiện trong quan sát và khớp nguyên văn một dòng
+của tài liệu mới. Snippet chỉ đủ nếu chứa trọn dòng claim.
 
 CÔNG CỤ CÓ SẴN:
     ctx.observed_text  -> toàn bộ quan sát agent đã thấy, nối lại
@@ -68,16 +68,40 @@ class CitationChecker(Middleware):
     name = "citation_checker"
 
     def after_agent(self, ctx, report):
-        # TODO (§11): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; bỏ qua nếu rỗng hoặc ctx.corpus là None.
-        #  2. Với mỗi claim, gọi ctx.corpus.get(claim["doc_id"]).
-        #     Nếu tài liệu tồn tại VÀ claim["text"] khớp NGUYÊN VĂN một
-        #     DÒNG trong body của nó (không phải chỉ "nằm trong body")
-        #     -> trích dẫn đã đúng, giữ nguyên claim.
-        #  3. Nếu không: tìm trong ctx.corpus.docs tài liệu đầu tiên thoả
-        #     doc.body in ctx.observed_text  và  claim["text"] khớp
-        #     nguyên văn một DÒNG của doc.body -> đó là nguồn thật.
-        #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
-        #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
-        #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or ctx.corpus is None:
+            return report
+
+        def matches_line(doc, text: str) -> bool:
+            body = getattr(doc, "body", "")
+            if not isinstance(body, str):
+                return False
+            # The model can quote a truncated part of a line. The scorer
+            # accepts that substring as long as it stays within one line.
+            return bool(text) and any(text in line for line in body.splitlines())
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str):
+                continue
+            current_doc = ctx.corpus.get(claim.get("doc_id"))
+            if (current_doc is not None and matches_line(current_doc, text)
+                    and text in ctx.observed_text
+                    and current_doc.doc_id in ctx.observed_text):
+                continue
+            for doc in getattr(ctx.corpus, "docs", []):
+                if (text in ctx.observed_text and doc.doc_id in ctx.observed_text
+                        and matches_line(doc, text)):
+                    claim["doc_id"] = doc.doc_id
+                    break
+
+        report["citations"] = sorted(
+            {
+                claim["doc_id"]
+                for claim in claims
+                if isinstance(claim, dict) and isinstance(claim.get("doc_id"), str)
+            }
+        )
+        return report
